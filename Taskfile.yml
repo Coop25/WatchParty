@@ -1,0 +1,40 @@
+version: "3"
+
+tasks:
+  server:start:
+    desc: Start the Go WebSocket server in the background
+    cmds:
+      - powershell -Command "New-Item -ItemType Directory -Force .task | Out-Null"
+      - powershell -Command "if (Test-Path '.task/server.pid') { $$existingPid = Get-Content '.task/server.pid' | Select-Object -First 1; if ($$existingPid) { try { Get-Process -Id $$existingPid -ErrorAction Stop | Out-Null; Write-Host 'Server already running with PID' $$existingPid; exit 0 } catch {} } ; Remove-Item '.task/server.pid' -ErrorAction SilentlyContinue }"
+      - powershell -Command "$$proc = Start-Process powershell -ArgumentList '-Command', '$$env:GOTELEMETRY=''off''; Set-Location ''{{.TASKFILE_DIR}}/server''; go run .' -WorkingDirectory '{{.TASKFILE_DIR}}/server' -WindowStyle Hidden -PassThru -RedirectStandardOutput '{{.TASKFILE_DIR}}/.task/server.out.log' -RedirectStandardError '{{.TASKFILE_DIR}}/.task/server.err.log'; Set-Content '.task/server.pid' $$proc.Id; Write-Host ('Started server with PID ' + $$proc.Id)"
+
+  server:stop:
+    desc: Stop the background Go WebSocket server
+    cmds:
+      - powershell -Command "if (-not (Test-Path '.task/server.pid')) { Write-Host 'No PID file found. Server already stopped?'; exit 0 }; $$pid = Get-Content '.task/server.pid' | Select-Object -First 1; if (-not $$pid) { Remove-Item '.task/server.pid' -ErrorAction SilentlyContinue; Write-Host 'PID file was empty.'; exit 0 }; try { Stop-Process -Id $$pid -Force -ErrorAction Stop; Write-Host ('Stopped server PID ' + $$pid) } catch { Write-Host ('Process ' + $$pid + ' was not running') }; Remove-Item '.task/server.pid' -ErrorAction SilentlyContinue"
+
+  server:status:
+    desc: Show whether the background Go WebSocket server is running
+    cmds:
+      - powershell -Command "if (-not (Test-Path '.task/server.pid')) { Write-Host 'Server is stopped'; exit 0 }; $$pid = Get-Content '.task/server.pid' | Select-Object -First 1; try { $$proc = Get-Process -Id $$pid -ErrorAction Stop; Write-Host ('Server is running with PID ' + $$proc.Id) } catch { Write-Host 'PID file exists but process is not running' }"
+
+  docker:start:
+    desc: Build and start the Go WebSocket server in Docker
+    cmds:
+      - powershell -Command "docker build -t watchtogeather-server:dev '{{.TASKFILE_DIR}}/server'"
+      - cmd /c "docker rm -f watchtogeather-server-dev 1>nul 2>nul & docker run -d --name watchtogeather-server-dev -p 8080:8080 watchtogeather-server:dev && echo Started Docker container watchtogeather-server-dev on port 8080"
+
+  docker:stop:
+    desc: Stop the development Docker container without removing it
+    cmds:
+      - cmd /c "docker stop watchtogeather-server-dev && echo Stopped Docker container watchtogeather-server-dev || echo Docker container is not running"
+
+  docker:destroy:
+    desc: Stop and remove the development Docker container
+    cmds:
+      - cmd /c "docker rm -f watchtogeather-server-dev && echo Removed Docker container watchtogeather-server-dev || echo Docker container does not exist"
+
+  docker:logs:
+    desc: Tail logs from the development Docker container
+    cmds:
+      - cmd /c "docker logs --tail 100 -f watchtogeather-server-dev"

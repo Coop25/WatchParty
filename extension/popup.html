@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WatchTogether MVP</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="hero">
+        <div class="heroTopline">
+          <div class="eyebrow">Sync Console</div>
+          <div class="heroRule"></div>
+        </div>
+        <div class="heroTitleRow">
+          <h1>WatchTogether</h1>
+          <div id="connectionState" class="statusBadge">Disconnected</div>
+        </div>
+        <p class="lede">Room control, shared playback, and remote handoff from one compact panel.</p>
+      </header>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <div class="sectionTitle">Room</div>
+        </div>
+        <div class="stack">
+          <button id="createRoomButton">Create Room</button>
+          <div class="joinRow">
+            <input id="roomCodeInput" type="text" maxlength="6" placeholder="ROOMID" />
+            <button id="joinRoomButton">Join</button>
+          </div>
+        </div>
+        <div class="joinRow actionRow">
+          <button id="toggleUnlockButton" class="secondary">Unlock Controls</button>
+          <button id="disbandRoomButton" class="danger" hidden>Disband Room</button>
+        </div>
+        <div class="joinRow actionRow">
+          <button id="remoteActionButton" class="secondary" hidden>Put Down Remote</button>
+        </div>
+      </section>
+
+      <section class="panel panelSplit">
+        <div class="panelHeader">
+          <div class="sectionTitle">Server</div>
+        </div>
+        <div class="label">Server URL</div>
+        <div class="joinRow compactRow">
+          <input id="serverUrlInput" type="text" placeholder="ws://localhost:8080/ws" />
+          <button id="saveServerButton">Save</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <div class="sectionTitle">Session</div>
+        </div>
+        <div class="metricGrid">
+          <div class="metricCell">
+            <div class="label">Status</div>
+            <div id="connectionMirror" class="value">Disconnected</div>
+          </div>
+          <div class="metricCell">
+            <div class="label">Room</div>
+            <div id="roomState" class="value">Not joined</div>
+          </div>
+          <div class="metricCell">
+            <div class="label">Role</div>
+            <div id="roleState" class="value">Viewer</div>
+          </div>
+          <div class="metricCell">
+            <div class="label">Remote</div>
+            <div id="remoteState" class="value">Host</div>
+          </div>
+          <div class="metricCell">
+            <div class="label">Mode</div>
+            <div id="remoteModeState" class="value">Synced</div>
+          </div>
+        </div>
+        <div id="connectionError" class="small error" hidden></div>
+      </section>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <div class="sectionTitle">Media</div>
+        </div>
+        <div class="metricGrid compactGrid">
+          <div class="metricCell">
+            <div class="label">Video Detection</div>
+            <div id="videoState" class="value">Unknown</div>
+          </div>
+          <div class="metricCell">
+            <div class="label">Media Match</div>
+            <div id="mediaMatchState" class="value">Unknown</div>
+          </div>
+        </div>
+        <div class="infoStrip">
+          <div class="label">Current Page</div>
+          <div id="currentPage" class="small">No active video detected.</div>
+        </div>
+        <div class="infoStrip">
+          <div class="label">Room Media</div>
+          <div id="roomMedia" class="small">No room media yet.</div>
+        </div>
+        <button id="navigateButton" class="secondary" hidden>Open Room Media</button>
+      </section>
+
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+services:
+  app:
+    image: ${WATCHTOGEATHER_IMAGE}
+    container_name: watchtogeather-app
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      ADDR: :8080
+    expose:
+      - "8080"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: watchtogeather-cloudflared
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      - app
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
