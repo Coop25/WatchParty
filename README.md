@@ -73,10 +73,10 @@ The Docker tasks build `server/Dockerfile` into `watchtogeather-server:dev` and 
 
 If you publish the server image to GitHub Container Registry or another registry, you can run it on another machine with the included `docker-compose.yml`.
 
-This repo includes `.github/workflows/publish-server-image.yml`, which builds `server/Dockerfile` and publishes `ghcr.io/coop25/watchparty-server` on pushes to `master`, version tags like `v1.0.0`, and manual runs.
+This repo includes `.github/workflows/publish-server-image.yml`, which builds `server/Dockerfile` and publishes `ghcr.io/coop25/watchparty-server` when a GitHub Release is published. The image is tagged only with that release tag, such as `v1.0.0`.
 
 1. Copy `.env.example` to `.env`
-2. Set `WATCHTOGEATHER_IMAGE` to your published image tag
+2. Set `WATCHTOGEATHER_IMAGE` to your published release image tag, for example `ghcr.io/coop25/watchparty-server:v1.0.0`
 3. Set `CLOUDFLARE_TUNNEL_TOKEN` to the token for a named Cloudflare Tunnel
 4. Start the stack:
 

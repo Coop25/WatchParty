@@ -1,0 +1,9 @@
+.env
+*.zip
+
+# Packed Chrome extension outputs
+*.crx
+*.pem
+extension/*.zip
+extension/*.crx
+extension/*.pem
