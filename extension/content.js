@@ -256,6 +256,13 @@ function maybePauseForRoomSync(status) {
     return;
   }
 
+  // Only passive viewers should be auto-paused while they settle onto the
+  // room media. The host or whoever currently controls playback should never
+  // get interrupted by this bootstrap safeguard.
+  if (controlState.canControlLocally) {
+    return;
+  }
+
   const pageUrl = status?.media?.pageUrl || "";
   const roomMediaUrl = controlState.roomMediaUrl || "";
   if (!pageUrl) {

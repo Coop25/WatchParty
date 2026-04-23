@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -88,7 +89,10 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				RoomID:   client.roomID,
 				ClientID: client.id,
 				SentAt:   time.Now().UnixMilli(),
-				Payload:  protocol.ErrorPayload{Message: err.Error()},
+				Payload: protocol.ErrorPayload{
+					Code:    errorCode(err),
+					Message: err.Error(),
+				},
 			})
 		}
 	}
@@ -213,4 +217,14 @@ func (c *clientConn) write(message protocol.Envelope) error {
 
 func newClientID() string {
 	return time.Now().Format("20060102150405.000000000")
+}
+
+func errorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	if fmt.Sprintf("%v", err) == "room not found" {
+		return "room_not_found"
+	}
+	return ""
 }

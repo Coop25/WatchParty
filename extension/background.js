@@ -4,6 +4,8 @@ const TIME_SYNC_SAMPLES = 5;
 const MIN_TIME_SYNC_SAMPLES = 3;
 const AUTO_NAVIGATE_COOLDOWN_MS = 3 * 60 * 1000;
 const MAX_CONNECTION_FAILURES = 3;
+const ROOM_INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000;
+const ROOM_NAVIGATION_SETTLE_MS = 20000;
 const VIEWER_READY_POSITION_TOLERANCE_SECONDS = 0.75;
 const VIEWER_READY_BUFFER_AHEAD_SECONDS = 4;
 const VIEWER_READY_STABLE_MS = 5000;
@@ -13,7 +15,7 @@ const DEFAULT_AUTO_PLAY_ENABLED = true;
 const POP_OUT_WINDOW_URL = "popup.html?mode=window";
 const POP_OUT_WINDOW_WIDTH = 440;
 const POP_OUT_WINDOW_HEIGHT = 760;
-const STORAGE_KEYS = ["serverUrl", "autoPlayEnabled", "clientSessionId", "roomId", "roomTabId", "shouldReconnectRoom"];
+const STORAGE_KEYS = ["serverUrl", "autoPlayEnabled", "clientSessionId", "roomId", "roomTabId", "shouldReconnectRoom", "lastRoomActivityAt"];
 
 const state = {
   ws: null,
@@ -37,6 +39,8 @@ const state = {
   shouldRetryConnection: false,
   lastAutoNavigatedRoomUrl: "",
   lastAutoNavigateAt: 0,
+  pendingRoomNavigationUrl: "",
+  pendingRoomNavigationStartedAt: 0,
   lastViewerSyncKey: "",
   lastClientReadyKey: "",
   viewerReadySinceAt: 0,
@@ -46,6 +50,7 @@ const state = {
   unlockedTabIds: {},
   autoPlayEnabled: DEFAULT_AUTO_PLAY_ENABLED,
   shouldReconnectRoom: false,
+  lastRoomActivityAt: 0,
   popupWindowId: null
 };
 
@@ -71,7 +76,7 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-initializeState();
+const initializeStatePromise = initializeState();
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "popup") {
@@ -140,6 +145,22 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+  if (tabId === state.roomTabId) {
+    if (changeInfo.url && urlsMatch(changeInfo.url, state.pendingRoomNavigationUrl)) {
+      state.pendingRoomNavigationStartedAt = Date.now();
+    }
+    if (changeInfo.status === "complete") {
+      const updatedTab = await chrome.tabs.get(tabId).catch(() => null);
+      const updatedUrl = updatedTab?.url || "";
+      if (
+        state.pendingRoomNavigationUrl
+        && (!updatedUrl || urlsMatch(updatedUrl, state.pendingRoomNavigationUrl))
+      ) {
+        clearPendingRoomNavigation();
+      }
+    }
+  }
+
   if ((tabId === state.activeTabId || tabId === state.roomTabId) && changeInfo.status === "complete") {
     await requestTabStatus(tabId);
     await syncControlStateToRoomTab(tabId);
@@ -158,6 +179,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   delete state.lastNetworkActivityAt[tabId];
   state.roomTabId = null;
   state.lastContentStatus = null;
+  clearPendingRoomNavigation();
   persistRoomState();
   broadcastState();
 
@@ -196,6 +218,8 @@ chrome.webRequest.onErrorOccurred.addListener(
 );
 
 setInterval(async () => {
+  maybeExpireLocalRoom();
+
   const tabId = state.roomTabId || await getActiveTabId();
   if (tabId && (!state.roomTabId || tabId === state.roomTabId)) {
     if (!state.roomTabId) {
@@ -215,6 +239,7 @@ setInterval(async () => {
 }, HEARTBEAT_INTERVAL_MS);
 
 async function handlePopupMessage(message) {
+  await initializeStatePromise;
   switch (message?.type) {
     case "create_room":
       await setRoomTabId(state.activeTabId || await getActiveTabId());
@@ -222,6 +247,7 @@ async function handlePopupMessage(message) {
       state.shouldRetryConnection = true;
       state.connectionFailures = 0;
       state.shouldReconnectRoom = true;
+      markRoomActivity();
       persistRoomState();
       if (!await ensureConnected()) {
         break;
@@ -239,6 +265,7 @@ async function handlePopupMessage(message) {
       state.roomId = normalizeRoomId(message.payload?.roomId || "");
       state.role = "viewer";
       state.shouldReconnectRoom = true;
+      markRoomActivity();
       persistRoomState();
       sendToServer("join_room", { roomId: state.roomId, clientSessionId: state.clientSessionId });
       break;
@@ -389,7 +416,15 @@ function handleServerMessage(message) {
       const previousRemoteHolderClientId = state.roomState?.remoteHolderClientId || "";
       state.roomId = message.roomId || state.roomId;
       state.roomState = message.payload;
-      state.clientId = state.clientSessionId;
+      markRoomActivity();
+      const resolvedClientId = message.clientId || state.clientSessionId;
+      state.clientId = resolvedClientId;
+      if (resolvedClientId && state.clientSessionId !== resolvedClientId) {
+        state.clientSessionId = resolvedClientId;
+        chrome.storage.local.set({ clientSessionId: resolvedClientId }).catch(() => {
+          // Ignore storage write failures in the background worker.
+        });
+      }
       persistRoomState();
       state.lastViewerSyncKey = "";
       state.lastClientReadyKey = "";
@@ -415,6 +450,7 @@ function handleServerMessage(message) {
       break;
       }
     case "scheduled_play":
+      markRoomActivity();
       state.awaitingHostManualPlay = false;
       applyToContent({
         type: "scheduled_play",
@@ -427,10 +463,12 @@ function handleServerMessage(message) {
       updateLocalRoomStateForCommand("scheduled_play", message.payload);
       break;
     case "pause":
+      markRoomActivity();
       applyToContent({ type: "pause", payload: message.payload });
       updateLocalRoomStateForCommand("pause", message.payload);
       break;
     case "seek":
+      markRoomActivity();
       applyToContent({
         type: "seek",
         payload: {
@@ -443,10 +481,12 @@ function handleServerMessage(message) {
       updateLocalRoomStateForCommand("seek", message.payload);
       break;
     case "rate_change":
+      markRoomActivity();
       applyToContent({ type: "rate_change", payload: message.payload });
       updateLocalRoomStateForCommand("rate_change", message.payload);
       break;
     case "media_changed":
+      markRoomActivity();
       if (holdsRemote()) {
         state.awaitingHostManualPlay = !message.payload?.autoPlayOnReady;
       }
@@ -455,10 +495,15 @@ function handleServerMessage(message) {
       break;
     case "room_closed":
       disconnectFromServer();
-      clearRoomState("Room closed by host.");
+      clearRoomState(roomClosedReason(message.payload?.reason));
       return;
     case "error":
       state.lastError = message.payload?.message || "Server error";
+      if (shouldClearRoomForServerError(message.payload)) {
+        disconnectFromServer();
+        clearRoomState(roomMissingReason(message.payload));
+        return;
+      }
       console.warn("Server error:", message.payload?.message);
       break;
     default:
@@ -514,6 +559,11 @@ function maybeSendMediaChanged() {
     return;
   }
 
+  if (state.role === "host" && !state.roomState?.media?.pageUrl) {
+    initializeRoomFromActivePage();
+    return;
+  }
+
   const currentKey = state.lastContentStatus.media?.mediaKey || "";
   const roomKey = state.roomState?.media?.mediaKey || "";
   const currentPageUrl = state.lastContentStatus.media?.pageUrl || "";
@@ -524,8 +574,13 @@ function maybeSendMediaChanged() {
       positionSeconds: state.lastContentStatus.currentTime,
       playbackRate: state.lastContentStatus.playbackRate,
       playing: false,
-      autoPlayOnReady: currentAutoPlayOnReady()
+      autoPlayOnReady: autoPlayOnRoomMediaChange()
     });
+    if (state.role === "host") {
+      state.awaitingHostManualPlay = true;
+      broadcastState();
+      syncControlStateToRoomTab();
+    }
   }
 }
 
@@ -557,9 +612,11 @@ function initializeRoomFromActivePage() {
       positionSeconds: state.lastContentStatus.currentTime || 0,
       playbackRate: state.lastContentStatus.playbackRate || 1,
       playing: false,
-      autoPlayOnReady: currentAutoPlayOnReady()
+      autoPlayOnReady: autoPlayOnRoomMediaChange()
     });
-    state.awaitingHostManualPlay = !currentAutoPlayOnReady();
+    state.awaitingHostManualPlay = true;
+    broadcastState();
+    syncControlStateToRoomTab();
   }
 }
 
@@ -673,6 +730,23 @@ async function maybeAutoNavigateToRoomMedia() {
 
   const currentPageUrl = state.lastContentStatus?.media?.pageUrl || "";
   if (urlsMatch(roomMediaUrl, currentPageUrl)) {
+    clearPendingRoomNavigation();
+    return;
+  }
+
+  const roomTab = await chrome.tabs.get(state.roomTabId).catch(() => null);
+  const tabUrl = roomTab?.url || "";
+  const tabPendingUrl = roomTab?.pendingUrl || "";
+  if (urlsMatch(roomMediaUrl, tabUrl) || urlsMatch(roomMediaUrl, tabPendingUrl)) {
+    state.pendingRoomNavigationUrl = roomMediaUrl;
+    state.pendingRoomNavigationStartedAt = Date.now();
+    return;
+  }
+
+  if (
+    state.pendingRoomNavigationUrl === roomMediaUrl
+    && (Date.now() - state.pendingRoomNavigationStartedAt) < ROOM_NAVIGATION_SETTLE_MS
+  ) {
     return;
   }
 
@@ -1002,9 +1076,22 @@ async function initializeState() {
   state.clientId = state.clientSessionId;
   state.roomId = normalizeRoomId(stored.roomId || "");
   state.roomTabId = Number.isInteger(stored.roomTabId) ? stored.roomTabId : null;
+  state.lastRoomActivityAt = Number.isFinite(stored.lastRoomActivityAt) ? stored.lastRoomActivityAt : 0;
   state.shouldReconnectRoom = Boolean(stored.shouldReconnectRoom) && Boolean(state.roomId);
   if (!stored.clientSessionId) {
     await chrome.storage.local.set({ clientSessionId: state.clientSessionId });
+  }
+  if (isRoomInactive()) {
+    state.roomId = "";
+    state.roomTabId = null;
+    state.shouldReconnectRoom = false;
+    state.lastRoomActivityAt = 0;
+    await chrome.storage.local.set({
+      roomId: "",
+      roomTabId: null,
+      shouldReconnectRoom: false,
+      lastRoomActivityAt: 0
+    });
   }
   if (state.shouldReconnectRoom && state.roomId) {
     state.shouldRetryConnection = true;
@@ -1089,6 +1176,8 @@ function clearRoomState(reason) {
   state.lastClientReadyKey = "";
   state.viewerReadySinceAt = 0;
   state.awaitingHostManualPlay = false;
+  clearPendingRoomNavigation();
+  state.lastRoomActivityAt = 0;
   if (previousRoomTabId) {
     delete state.pendingNetworkRequests[previousRoomTabId];
     delete state.lastNetworkActivityAt[previousRoomTabId];
@@ -1153,6 +1242,13 @@ function currentAutoPlayOnReady() {
   return state.roomState?.playback?.autoPlayOnReady !== false;
 }
 
+function autoPlayOnRoomMediaChange() {
+  if (state.role === "host") {
+    return false;
+  }
+  return currentAutoPlayOnReady();
+}
+
 function describeRemoteState() {
   if (!state.roomId) {
     return "Not in room";
@@ -1210,6 +1306,11 @@ function canSendPlaybackCommands() {
   return Boolean(state.roomId) && (Boolean(state.roomState?.sharedControlEnabled) || holdsRemote());
 }
 
+function clearPendingRoomNavigation() {
+  state.pendingRoomNavigationUrl = "";
+  state.pendingRoomNavigationStartedAt = 0;
+}
+
 async function setRoomTabId(nextTabId) {
   const previousRoomTabId = state.roomTabId;
   state.roomTabId = nextTabId || null;
@@ -1237,6 +1338,8 @@ async function navigateToRoomMedia() {
   }
 
   await setRoomTabId(tabId);
+  state.pendingRoomNavigationUrl = roomMediaUrl;
+  state.pendingRoomNavigationStartedAt = Date.now();
   await chrome.tabs.update(tabId, { url: roomMediaUrl });
 }
 
@@ -1306,8 +1409,62 @@ function persistRoomState() {
   chrome.storage.local.set({
     roomId: state.roomId || "",
     roomTabId: state.roomTabId ?? null,
-    shouldReconnectRoom: Boolean(state.shouldReconnectRoom && state.roomId)
+    shouldReconnectRoom: Boolean(state.shouldReconnectRoom && state.roomId),
+    lastRoomActivityAt: state.lastRoomActivityAt || 0
   }).catch(() => {
     // Ignore storage write failures in the background worker.
   });
+}
+
+function markRoomActivity(at = Date.now()) {
+  state.lastRoomActivityAt = at;
+  persistRoomState();
+}
+
+function isRoomInactive(referenceTime = Date.now()) {
+  return Boolean(state.roomId)
+    && state.lastRoomActivityAt > 0
+    && (referenceTime - state.lastRoomActivityAt) >= ROOM_INACTIVITY_TIMEOUT_MS;
+}
+
+function maybeExpireLocalRoom() {
+  if (!isRoomInactive()) {
+    return;
+  }
+
+  disconnectFromServer();
+  clearRoomState("Room expired after 1 hour of inactivity.");
+}
+
+function roomClosedReason(reason) {
+  if (reason === "inactive_timeout") {
+    return "Room expired after 1 hour of inactivity.";
+  }
+  if (reason === "host_disbanded") {
+    return "Room closed by host.";
+  }
+  return "Room closed.";
+}
+
+function roomMissingReason(errorPayload) {
+  const code = String(errorPayload?.code || "").toLowerCase();
+  if (code === "room_not_found") {
+    return "Room no longer exists on the server.";
+  }
+
+  const normalized = String(errorPayload?.message || "").toLowerCase();
+  if (normalized.includes("room expired")) {
+    return "Room expired after 1 hour of inactivity.";
+  }
+  return "Room no longer exists on the server.";
+}
+
+function shouldClearRoomForServerError(errorPayload) {
+  const code = String(errorPayload?.code || "").toLowerCase();
+  if (code === "room_not_found") {
+    return true;
+  }
+
+  const normalized = String(errorPayload?.message || "").toLowerCase();
+  return normalized.includes("room not found") || normalized.includes("room expired");
 }

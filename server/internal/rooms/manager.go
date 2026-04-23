@@ -19,6 +19,8 @@ const (
 	mediaWaitLead       = 15000 * time.Millisecond
 	readyGraceLead      = 5000 * time.Millisecond
 	hostReconnectGrace  = 30 * time.Second
+	roomInactivityTTL   = 1 * time.Hour
+	roomCleanupInterval = 1 * time.Minute
 	roomCodeLength      = 6
 )
 
@@ -52,10 +54,13 @@ type Room struct {
 	ReadyViewerIDs           map[string]bool
 	ReadyGraceArmed          bool
 	HostDisconnectDeadlineMS int64
+	LastActivityAtMS         int64
 }
 
 func NewManager() *Manager {
-	return &Manager{rooms: make(map[string]*Room)}
+	manager := &Manager{rooms: make(map[string]*Room)}
+	go manager.expireInactiveRoomsLoop()
+	return manager
 }
 
 func (m *Manager) CreateRoom(host Client) (*Room, error) {
@@ -78,6 +83,7 @@ func (m *Manager) CreateRoom(host Client) (*Room, error) {
 			RemoteHolderClientID: host.ID(),
 			PlaybackRate:         1,
 			LastUpdatedAtMS:      now,
+			LastActivityAtMS:     now,
 			AutoPlayOnReady:      true,
 			Clients:              map[string]Client{host.ID(): host},
 			ReadyViewerIDs:       make(map[string]bool),
@@ -101,6 +107,7 @@ func (m *Manager) JoinRoom(roomID string, client Client) (*Room, error) {
 	}
 
 	room.Clients[client.ID()] = client
+	m.touchRoomLocked(room, nowMS())
 	if room.HostClientID == client.ID() {
 		room.HostDisconnectDeadlineMS = 0
 		room.RemoteHolderClientID = client.ID()
@@ -129,6 +136,8 @@ func (m *Manager) RemoveClient(roomID, clientID string, client Client) {
 		delete(m.rooms, roomID)
 		return
 	}
+
+	m.touchRoomLocked(room, nowMS())
 
 	if room.HostClientID == clientID {
 		room.HostDisconnectDeadlineMS = nowMS() + hostReconnectGrace.Milliseconds()
@@ -224,6 +233,7 @@ func (m *Manager) ClaimRemote(roomID, clientID string) error {
 	}
 
 	room.RemoteHolderClientID = clientID
+	m.touchRoomLocked(room, nowMS())
 	log.Printf("remote claimed room_id=%s client_id=%s", roomID, clientID)
 	m.broadcastLocked(room, protocol.Envelope{
 		Type:    "room_state",
@@ -246,6 +256,7 @@ func (m *Manager) ReleaseRemote(roomID, clientID string) error {
 	}
 
 	room.RemoteHolderClientID = ""
+	m.touchRoomLocked(room, nowMS())
 	log.Printf("remote released room_id=%s client_id=%s", roomID, clientID)
 	m.broadcastLocked(room, protocol.Envelope{
 		Type:    "room_state",
@@ -268,6 +279,7 @@ func (m *Manager) ReclaimRemote(roomID, clientID string) error {
 	}
 
 	room.RemoteHolderClientID = clientID
+	m.touchRoomLocked(room, nowMS())
 	log.Printf("remote reclaimed room_id=%s host_client_id=%s", roomID, clientID)
 	m.broadcastLocked(room, protocol.Envelope{
 		Type:    "room_state",
@@ -293,6 +305,7 @@ func (m *Manager) SetSharedControl(roomID, clientID string, enabled bool) error 
 	if enabled {
 		room.RemoteHolderClientID = room.HostClientID
 	}
+	m.touchRoomLocked(room, nowMS())
 	log.Printf("shared control updated room_id=%s host_client_id=%s enabled=%t", roomID, clientID, enabled)
 	m.broadcastLocked(room, protocol.Envelope{
 		Type:    "room_state",
@@ -333,6 +346,7 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 		room.ResumePosition = incoming.PositionSeconds
 		room.ResumePlaybackRate = room.PlaybackRate
 		room.WaitDeadlineMS = 0
+		m.touchRoomLocked(room, now)
 		if room.AutoPlayOnReady && len(room.Clients) > 1 {
 			room.WaitingForReady = true
 			room.WaitDeadlineMS = now + mediaWaitLead.Milliseconds()
@@ -383,6 +397,7 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 		room.WaitDeadlineMS = 0
 		room.ReadyGraceArmed = false
 		room.ReadyViewerIDs = make(map[string]bool)
+		m.touchRoomLocked(room, now)
 		log.Printf("room event room_id=%s host_client_id=%s type=scheduled_play media_key=%s position=%.3f rate=%.3f start_at_ms=%d", room.ID, clientID, room.Media.MediaKey, room.BasePositionSeconds, room.PlaybackRate, room.ScheduledStartAtMS)
 		reply := protocol.ScheduledPlayPayload{
 			TargetTimeSeconds: room.BasePositionSeconds,
@@ -406,6 +421,7 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 		room.WaitingForReady = false
 		room.WaitDeadlineMS = 0
 		room.ReadyGraceArmed = false
+		m.touchRoomLocked(room, now)
 		log.Printf("room event room_id=%s host_client_id=%s type=pause media_key=%s position=%.3f", room.ID, clientID, room.Media.MediaKey, room.BasePositionSeconds)
 		return m.broadcastLocked(room, protocol.Envelope{
 			Type:   "pause",
@@ -436,6 +452,7 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 			room.ScheduledStartAtMS = 0
 			room.LastUpdatedAtMS = now
 		}
+		m.touchRoomLocked(room, now)
 		log.Printf("room event room_id=%s host_client_id=%s type=seek media_key=%s position=%.3f rate=%.3f resume=%t start_at_ms=%d", room.ID, clientID, room.Media.MediaKey, room.BasePositionSeconds, room.PlaybackRate, room.Playing, room.ScheduledStartAtMS)
 		return m.broadcastLocked(room, protocol.Envelope{
 			Type:   "seek",
@@ -463,6 +480,7 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 		room.WaitingForReady = false
 		room.WaitDeadlineMS = 0
 		room.ReadyGraceArmed = false
+		m.touchRoomLocked(room, now)
 		log.Printf("room event room_id=%s host_client_id=%s type=rate_change media_key=%s position=%.3f rate=%.3f", room.ID, clientID, room.Media.MediaKey, room.BasePositionSeconds, room.PlaybackRate)
 		return m.broadcastLocked(room, protocol.Envelope{
 			Type:   "rate_change",
@@ -489,6 +507,9 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 		room.WaitingForReady = false
 		room.WaitDeadlineMS = 0
 		room.ReadyGraceArmed = false
+		if incoming.Playing {
+			m.touchRoomLocked(room, now)
+		}
 		log.Printf("room event room_id=%s host_client_id=%s type=heartbeat media_key=%s position=%.3f rate=%.3f playing=%t", room.ID, clientID, room.Media.MediaKey, room.BasePositionSeconds, room.PlaybackRate, room.Playing)
 		return m.broadcastLocked(room, protocol.Envelope{
 			Type:    "room_state",
@@ -519,6 +540,7 @@ func (m *Manager) HandleViewerReady(roomID, clientID string, payload protocol.Cl
 	}
 
 	room.ReadyViewerIDs[clientID] = true
+	m.touchRoomLocked(room, nowMS())
 	log.Printf("room viewer ready room_id=%s client_id=%s ready=%d awaited=%d", roomID, clientID, len(room.ReadyViewerIDs), max(0, len(room.Clients)-1))
 	state := room.snapshotLocked(nowMS())
 	m.broadcastLocked(room, protocol.Envelope{
@@ -597,6 +619,7 @@ func (m *Manager) resumeWaitingLocked(room *Room, now int64) error {
 	room.ScheduledStartAtMS = now + readyResumePlayLead.Milliseconds()
 	room.LastUpdatedAtMS = room.ScheduledStartAtMS
 	room.ReadyViewerIDs = make(map[string]bool)
+	m.touchRoomLocked(room, now)
 
 	log.Printf("room ready resume room_id=%s start_at_ms=%d position=%.3f rate=%.3f", room.ID, room.ScheduledStartAtMS, room.BasePositionSeconds, room.PlaybackRate)
 	m.broadcastLocked(room, protocol.Envelope{
@@ -616,6 +639,53 @@ func (m *Manager) resumeWaitingLocked(room *Room, now int64) error {
 	})
 
 	return nil
+}
+
+func (m *Manager) expireInactiveRoomsLoop() {
+	ticker := time.NewTicker(roomCleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.expireInactiveRooms()
+	}
+}
+
+func (m *Manager) expireInactiveRooms() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := nowMS()
+	for roomID, room := range m.rooms {
+		if !m.roomInactiveLocked(room, now) {
+			continue
+		}
+		log.Printf("room expired room_id=%s reason=inactivity last_activity_at_ms=%d", roomID, room.LastActivityAtMS)
+		m.closeRoomLocked(roomID, room, "inactive_timeout")
+	}
+}
+
+func (m *Manager) closeRoomLocked(roomID string, room *Room, reason string) {
+	for _, client := range room.Clients {
+		client.Send(protocol.Envelope{
+			Type:   "room_closed",
+			RoomID: room.ID,
+			Payload: protocol.RoomClosedPayload{
+				Reason: reason,
+			},
+		})
+	}
+	delete(m.rooms, roomID)
+}
+
+func (m *Manager) touchRoomLocked(room *Room, now int64) {
+	room.LastActivityAtMS = now
+}
+
+func (m *Manager) roomInactiveLocked(room *Room, now int64) bool {
+	if room.LastActivityAtMS <= 0 {
+		return false
+	}
+	return now-room.LastActivityAtMS >= roomInactivityTTL.Milliseconds()
 }
 
 func (r *Room) snapshotLocked(now int64) protocol.RoomStatePayload {
