@@ -2,7 +2,7 @@ const DEFAULT_SERVER_WS_URL = "ws://localhost:8080/ws";
 const HEARTBEAT_INTERVAL_MS = 2000;
 const TIME_SYNC_SAMPLES = 5;
 const MIN_TIME_SYNC_SAMPLES = 3;
-const AUTO_NAVIGATE_COOLDOWN_MS = 3000;
+const AUTO_NAVIGATE_COOLDOWN_MS = 3 * 60 * 1000;
 const MAX_CONNECTION_FAILURES = 3;
 const VIEWER_READY_POSITION_TOLERANCE_SECONDS = 0.75;
 const VIEWER_READY_BUFFER_AHEAD_SECONDS = 4;
@@ -10,6 +10,10 @@ const VIEWER_READY_STABLE_MS = 5000;
 const VIEWER_NETWORK_IDLE_MS = 5000;
 const VIEWER_READY_MIN_READY_STATE = 4;
 const DEFAULT_AUTO_PLAY_ENABLED = true;
+const POP_OUT_WINDOW_URL = "popup.html?mode=window";
+const POP_OUT_WINDOW_WIDTH = 440;
+const POP_OUT_WINDOW_HEIGHT = 760;
+const STORAGE_KEYS = ["serverUrl", "autoPlayEnabled", "clientSessionId", "roomId", "roomTabId", "shouldReconnectRoom"];
 
 const state = {
   ws: null,
@@ -17,6 +21,7 @@ const state = {
   reconnectTimer: null,
   roomId: "",
   clientId: "",
+  clientSessionId: "",
   role: "viewer",
   roomState: null,
   serverOffsetMs: 0,
@@ -39,17 +44,22 @@ const state = {
   pendingNetworkRequests: {},
   lastNetworkActivityAt: {},
   unlockedTabIds: {},
-  autoPlayEnabled: DEFAULT_AUTO_PLAY_ENABLED
+  autoPlayEnabled: DEFAULT_AUTO_PLAY_ENABLED,
+  shouldReconnectRoom: false,
+  popupWindowId: null
 };
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.get(["serverUrl", "autoPlayEnabled"]).then((stored) => {
+  chrome.storage.local.get(STORAGE_KEYS).then((stored) => {
     const nextValues = {};
     if (!stored.serverUrl) {
       nextValues.serverUrl = DEFAULT_SERVER_WS_URL;
     }
     if (typeof stored.autoPlayEnabled !== "boolean") {
       nextValues.autoPlayEnabled = DEFAULT_AUTO_PLAY_ENABLED;
+    }
+    if (!stored.clientSessionId) {
+      nextValues.clientSessionId = crypto.randomUUID();
     }
     if (Object.keys(nextValues).length > 0) {
       return chrome.storage.local.set(nextValues);
@@ -136,6 +146,34 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   }
 });
 
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  if (state.activeTabId === tabId) {
+    state.activeTabId = null;
+  }
+  if (state.roomTabId !== tabId) {
+    return;
+  }
+
+  delete state.pendingNetworkRequests[tabId];
+  delete state.lastNetworkActivityAt[tabId];
+  state.roomTabId = null;
+  state.lastContentStatus = null;
+  persistRoomState();
+  broadcastState();
+
+  const nextActiveTabId = await getActiveTabId();
+  state.activeTabId = nextActiveTabId;
+  if (nextActiveTabId) {
+    await requestTabStatus(nextActiveTabId);
+  }
+});
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (state.popupWindowId === windowId) {
+    state.popupWindowId = null;
+  }
+});
+
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     trackNetworkActivity(details.tabId, 1, details.type);
@@ -183,10 +221,12 @@ async function handlePopupMessage(message) {
       await refreshRoomTabStatus();
       state.shouldRetryConnection = true;
       state.connectionFailures = 0;
+      state.shouldReconnectRoom = true;
+      persistRoomState();
       if (!await ensureConnected()) {
         break;
       }
-      sendToServer("create_room", {});
+      sendToServer("create_room", { clientSessionId: state.clientSessionId });
       break;
     case "join_room":
       await setRoomTabId(state.activeTabId || await getActiveTabId());
@@ -198,7 +238,9 @@ async function handlePopupMessage(message) {
       }
       state.roomId = normalizeRoomId(message.payload?.roomId || "");
       state.role = "viewer";
-      sendToServer("join_room", { roomId: state.roomId });
+      state.shouldReconnectRoom = true;
+      persistRoomState();
+      sendToServer("join_room", { roomId: state.roomId, clientSessionId: state.clientSessionId });
       break;
     case "refresh_status":
       await refreshRoomTabStatus();
@@ -212,12 +254,27 @@ async function handlePopupMessage(message) {
     case "navigate_to_room_media":
       await navigateToRoomMedia();
       break;
+    case "adopt_active_tab":
+      await adoptActiveTabAsRoomTab();
+      break;
     case "toggle_tab_unlock":
       await toggleActiveTabUnlock();
+      break;
+    case "leave_room":
+      if (state.roomId && state.role === "viewer") {
+        await leaveCurrentRoom();
+      }
+      break;
+    case "set_shared_control":
+      if (state.roomId && state.role === "host") {
+        sendToServer("set_shared_control", { enabled: Boolean(message.payload?.enabled) });
+      }
       break;
     case "disband_room":
       if (state.roomId && state.role === "host") {
         sendToServer("disband_room", {});
+        disconnectFromServer();
+        clearRoomState("");
       }
       break;
     case "claim_remote":
@@ -234,6 +291,9 @@ async function handlePopupMessage(message) {
       if (state.roomId && state.role === "host") {
         sendToServer("reclaim_remote", {});
       }
+      break;
+    case "open_popup_window":
+      await openPopupWindow();
       break;
     default:
       break;
@@ -287,7 +347,7 @@ function connectWebSocket() {
     broadcastState();
     runTimeSync();
     if (state.roomId) {
-      sendToServer("join_room", { roomId: state.roomId });
+      sendToServer("join_room", { roomId: state.roomId, clientSessionId: state.clientSessionId });
     }
   });
 
@@ -320,7 +380,6 @@ function connectWebSocket() {
 function handleServerMessage(message) {
   switch (message.type) {
     case "welcome":
-      state.clientId = message.clientId || state.clientId;
       break;
     case "time_sync_reply":
       recordTimeSyncSample(message.payload);
@@ -330,6 +389,8 @@ function handleServerMessage(message) {
       const previousRemoteHolderClientId = state.roomState?.remoteHolderClientId || "";
       state.roomId = message.roomId || state.roomId;
       state.roomState = message.payload;
+      state.clientId = state.clientSessionId;
+      persistRoomState();
       state.lastViewerSyncKey = "";
       state.lastClientReadyKey = "";
       state.viewerReadySinceAt = 0;
@@ -393,6 +454,7 @@ function handleServerMessage(message) {
       broadcastState();
       break;
     case "room_closed":
+      disconnectFromServer();
       clearRoomState("Room closed by host.");
       return;
     case "error":
@@ -408,7 +470,7 @@ function handleServerMessage(message) {
 }
 
 function handleContentEvent(payload) {
-  if (!state.roomId || !holdsRemote()) {
+  if (!state.roomId || !canSendPlaybackCommands()) {
     return;
   }
 
@@ -448,7 +510,7 @@ function handleContentEvent(payload) {
 }
 
 function maybeSendMediaChanged() {
-  if (!state.roomId || !holdsRemote() || !state.lastContentStatus?.hasVideo) {
+  if (!state.roomId || !canSendPlaybackCommands() || !state.lastContentStatus?.hasVideo) {
     return;
   }
 
@@ -468,7 +530,7 @@ function maybeSendMediaChanged() {
 }
 
 function initializeRoomFromActivePage() {
-  if (!state.roomId || !holdsRemote() || !state.lastContentStatus) {
+  if (!state.roomId || !canSendPlaybackCommands() || !state.lastContentStatus) {
     return;
   }
 
@@ -601,8 +663,16 @@ async function maybeAutoNavigateToRoomMedia() {
   }
 
   const roomMediaUrl = state.roomState?.media?.pageUrl || "";
+  if (!roomMediaUrl) {
+    return;
+  }
+
+  if (!state.roomTabId) {
+    return;
+  }
+
   const currentPageUrl = state.lastContentStatus?.media?.pageUrl || "";
-  if (!roomMediaUrl || roomMediaUrl === currentPageUrl) {
+  if (urlsMatch(roomMediaUrl, currentPageUrl)) {
     return;
   }
 
@@ -794,11 +864,20 @@ function serverToLocalTime(serverTimeMs) {
 
 function publicState() {
   const roomMediaUrl = state.roomState?.media?.pageUrl || "";
+  const currentPageUrl = state.lastContentStatus?.media?.pageUrl || "";
   const mediaMatches = !state.roomState?.media?.mediaKey
     || !state.lastContentStatus?.media?.mediaKey
     || state.roomState.media.mediaKey === state.lastContentStatus.media.mediaKey;
+  const roomTabMissing = Boolean(state.roomId) && !state.roomTabId;
+  const currentPageMatchesRoom = Boolean(roomMediaUrl)
+    && urlsMatch(roomMediaUrl, currentPageUrl);
+  const canAdoptActiveTab = Boolean(state.roomId)
+    && roomTabMissing
+    && Boolean(currentPageUrl)
+    && (currentPageMatchesRoom || (state.role === "host" && !roomMediaUrl));
   const canNavigateToRoomMedia = Boolean(roomMediaUrl)
-    && roomMediaUrl !== (state.lastContentStatus?.media?.pageUrl || "");
+    && !currentPageMatchesRoom
+    && (!roomTabMissing || Boolean(state.activeTabId));
 
   return {
     wsState: state.wsState,
@@ -808,6 +887,8 @@ function publicState() {
     clientId: state.clientId,
     role: state.role,
     roomState: state.roomState,
+    viewerCount: state.roomState?.viewerCount || 0,
+    sharedControlEnabled: Boolean(state.roomState?.sharedControlEnabled),
     serverOffsetMs: state.serverOffsetMs,
     timeSyncReady: state.timeSyncReady,
     connectionFailures: state.connectionFailures,
@@ -816,6 +897,8 @@ function publicState() {
     videoStatus: state.lastContentStatus?.hasVideo ? "Video found" : "No HTML5 video found",
     mediaMatches,
     roomMediaUrl,
+    roomTabMissing,
+    canAdoptActiveTab,
     canNavigateToRoomMedia,
     tabControlUnlocked: isRoomTabUnlocked(),
     autoPlayEnabled: state.autoPlayEnabled,
@@ -824,7 +907,8 @@ function publicState() {
     remoteStateLabel: describeRemoteState(),
     remoteAction: remoteAction(),
     remoteActionLabel: remoteActionLabel(),
-    currentPage: state.lastContentStatus?.media?.pageUrl || "",
+    canToggleSharedControl: state.role === "host" && Boolean(state.roomId),
+    currentPage: currentPageUrl,
     currentTitle: state.lastContentStatus?.media?.pageTitle || ""
   };
 }
@@ -836,8 +920,10 @@ function buildControlState() {
   const mediaMatches = !roomMediaUrl || !currentPageUrl || roomMediaUrl === currentPageUrl;
   const isHost = state.role === "host";
   const isRemoteHolder = holdsRemote();
+  const sharedControlEnabled = Boolean(state.roomState?.sharedControlEnabled);
   const hostBootstrapAllowed = isHost && inRoom && !roomMediaUrl && Boolean(currentPageUrl);
   const controlsUnlocked = isRoomTabUnlocked();
+  const canControlPlayback = sharedControlEnabled || isRemoteHolder;
 
   return {
     inRoom,
@@ -846,9 +932,9 @@ function buildControlState() {
     roomMediaUrl,
     mediaMatches,
     controlsUnlocked,
-    requireManualPlay: state.awaitingHostManualPlay && isRemoteHolder,
+    requireManualPlay: state.awaitingHostManualPlay && canControlPlayback,
     roomTabIsActive: true,
-    canControlLocally: !controlsUnlocked && inRoom && isRemoteHolder && (mediaMatches || hostBootstrapAllowed),
+    canControlLocally: !controlsUnlocked && inRoom && canControlPlayback && (mediaMatches || hostBootstrapAllowed),
     canApplyRemote: !controlsUnlocked && inRoom && Boolean(roomMediaUrl) && mediaMatches
   };
 }
@@ -907,11 +993,23 @@ function waitForTimeSync(timeoutMs = 1500) {
 }
 
 async function initializeState() {
-  const stored = await chrome.storage.local.get(["serverUrl", "autoPlayEnabled"]);
+  const stored = await chrome.storage.local.get(STORAGE_KEYS);
   state.serverUrl = stored.serverUrl || DEFAULT_SERVER_WS_URL;
   state.autoPlayEnabled = typeof stored.autoPlayEnabled === "boolean"
     ? stored.autoPlayEnabled
     : DEFAULT_AUTO_PLAY_ENABLED;
+  state.clientSessionId = stored.clientSessionId || crypto.randomUUID();
+  state.clientId = state.clientSessionId;
+  state.roomId = normalizeRoomId(stored.roomId || "");
+  state.roomTabId = Number.isInteger(stored.roomTabId) ? stored.roomTabId : null;
+  state.shouldReconnectRoom = Boolean(stored.shouldReconnectRoom) && Boolean(state.roomId);
+  if (!stored.clientSessionId) {
+    await chrome.storage.local.set({ clientSessionId: state.clientSessionId });
+  }
+  if (state.shouldReconnectRoom && state.roomId) {
+    state.shouldRetryConnection = true;
+    connectWebSocket();
+  }
   broadcastState();
 }
 
@@ -933,6 +1031,31 @@ async function setAutoPlayEnabled(enabled) {
   state.autoPlayEnabled = enabled;
   await chrome.storage.local.set({ autoPlayEnabled: enabled });
   broadcastState();
+}
+
+async function leaveCurrentRoom() {
+  disconnectFromServer();
+  clearRoomState("");
+}
+
+function disconnectFromServer() {
+  state.shouldRetryConnection = false;
+  state.shouldReconnectRoom = false;
+  clearTimeout(state.reconnectTimer);
+  state.wsState = "disconnected";
+  state.connectionFailures = 0;
+  state.timeSyncReady = false;
+  state.timeSamples = [];
+  persistRoomState();
+  broadcastState();
+  if (state.ws) {
+    try {
+      state.ws.close();
+    } catch (error) {
+      console.warn("Failed to close websocket while leaving room", error);
+    }
+    state.ws = null;
+  }
 }
 
 async function toggleActiveTabUnlock() {
@@ -961,6 +1084,7 @@ function clearRoomState(reason) {
   state.role = "viewer";
   state.roomState = null;
   state.roomTabId = null;
+  state.shouldReconnectRoom = false;
   state.lastViewerSyncKey = "";
   state.lastClientReadyKey = "";
   state.viewerReadySinceAt = 0;
@@ -970,6 +1094,7 @@ function clearRoomState(reason) {
     delete state.lastNetworkActivityAt[previousRoomTabId];
   }
   state.lastError = reason || "";
+  persistRoomState();
   broadcastState();
   if (previousRoomTabId) {
     syncControlStateToTab(previousRoomTabId, disabledControlState());
@@ -1032,6 +1157,9 @@ function describeRemoteState() {
   if (!state.roomId) {
     return "Not in room";
   }
+  if (state.roomState?.sharedControlEnabled) {
+    return "Everyone";
+  }
   const remoteHolderClientId = state.roomState?.remoteHolderClientId || "";
   if (!remoteHolderClientId) {
     return "Available to claim";
@@ -1047,6 +1175,9 @@ function describeRemoteState() {
 
 function remoteAction() {
   if (!state.roomId) {
+    return "";
+  }
+  if (state.roomState?.sharedControlEnabled) {
     return "";
   }
   if (holdsRemote()) {
@@ -1075,6 +1206,10 @@ function remoteActionLabel() {
   return "";
 }
 
+function canSendPlaybackCommands() {
+  return Boolean(state.roomId) && (Boolean(state.roomState?.sharedControlEnabled) || holdsRemote());
+}
+
 async function setRoomTabId(nextTabId) {
   const previousRoomTabId = state.roomTabId;
   state.roomTabId = nextTabId || null;
@@ -1087,6 +1222,7 @@ async function setRoomTabId(nextTabId) {
     delete state.lastNetworkActivityAt[previousRoomTabId];
     await syncControlStateToTab(previousRoomTabId, disabledControlState());
   }
+  persistRoomState();
 }
 
 async function navigateToRoomMedia() {
@@ -1102,6 +1238,19 @@ async function navigateToRoomMedia() {
 
   await setRoomTabId(tabId);
   await chrome.tabs.update(tabId, { url: roomMediaUrl });
+}
+
+async function adoptActiveTabAsRoomTab() {
+  const activeTabId = state.activeTabId || await getActiveTabId();
+  if (!activeTabId) {
+    return;
+  }
+
+  await setRoomTabId(activeTabId);
+  await requestTabStatus(activeTabId);
+  await syncControlStateToRoomTab(activeTabId);
+  maybeSyncViewerAfterPageMatch();
+  broadcastState();
 }
 
 function trackNetworkActivity(tabId, delta, requestType) {
@@ -1126,4 +1275,39 @@ function isRoomTabNetworkIdle() {
   const pending = state.pendingNetworkRequests[state.roomTabId] || 0;
   const lastActivityAt = state.lastNetworkActivityAt[state.roomTabId] || 0;
   return pending === 0 && lastActivityAt > 0 && (Date.now() - lastActivityAt) >= VIEWER_NETWORK_IDLE_MS;
+}
+
+async function openPopupWindow() {
+  if (state.popupWindowId != null) {
+    try {
+      await chrome.windows.update(state.popupWindowId, { focused: true });
+      return;
+    } catch (error) {
+      state.popupWindowId = null;
+    }
+  }
+
+  const popupUrl = chrome.runtime.getURL(POP_OUT_WINDOW_URL);
+  const createdWindow = await chrome.windows.create({
+    url: popupUrl,
+    type: "popup",
+    width: POP_OUT_WINDOW_WIDTH,
+    height: POP_OUT_WINDOW_HEIGHT,
+    focused: true
+  });
+  state.popupWindowId = createdWindow.id ?? null;
+}
+
+function urlsMatch(left, right) {
+  return Boolean(left) && Boolean(right) && left === right;
+}
+
+function persistRoomState() {
+  chrome.storage.local.set({
+    roomId: state.roomId || "",
+    roomTabId: state.roomTabId ?? null,
+    shouldReconnectRoom: Boolean(state.shouldReconnectRoom && state.roomId)
+  }).catch(() => {
+    // Ignore storage write failures in the background worker.
+  });
 }

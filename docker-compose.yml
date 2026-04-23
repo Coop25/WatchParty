@@ -7,7 +7,7 @@ services:
     environment:
       ADDR: :8080
     expose:
-      - "8080"
+      - "8080:8080"
 
   cloudflared:
     image: cloudflare/cloudflared:latest

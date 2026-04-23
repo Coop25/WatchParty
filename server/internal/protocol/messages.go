@@ -28,16 +28,22 @@ type RoomClosedPayload struct {
 	Reason string `json:"reason"`
 }
 
-type CreateRoomPayload struct{}
+type CreateRoomPayload struct {
+	ClientSessionID string `json:"clientSessionId,omitempty"`
+}
 
 type JoinRoomPayload struct {
-	RoomID string `json:"roomId"`
+	RoomID          string `json:"roomId"`
+	ClientSessionID string `json:"clientSessionId,omitempty"`
 }
 
 type DisbandRoomPayload struct{}
 type ClaimRemotePayload struct{}
 type ReleaseRemotePayload struct{}
 type ReclaimRemotePayload struct{}
+type SetSharedControlPayload struct {
+	Enabled bool `json:"enabled"`
+}
 
 type TimeSyncPayload struct {
 	ClientSentAt int64 `json:"clientSentAt"`
@@ -73,6 +79,7 @@ type RoomStatePayload struct {
 	RoomID               string        `json:"roomId"`
 	HostClientID         string        `json:"hostClientId"`
 	RemoteHolderClientID string        `json:"remoteHolderClientId"`
+	SharedControlEnabled bool          `json:"sharedControlEnabled"`
 	ViewerCount          int           `json:"viewerCount"`
 	Media                MediaState    `json:"media"`
 	Playback             PlaybackState `json:"playback"`

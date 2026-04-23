@@ -11,6 +11,10 @@
       <header class="hero">
         <div class="heroTopline">
           <div class="eyebrow">Sync Console</div>
+          <button id="popOutButton" class="utilityButton" aria-label="Pop out window" title="Pop out window">
+            <span class="utilityButtonBox" aria-hidden="true"></span>
+            <span class="utilityButtonArrow" aria-hidden="true"></span>
+          </button>
           <div class="heroRule"></div>
         </div>
         <div class="heroTitleRow">
@@ -23,6 +27,7 @@
       <section class="panel">
         <div class="panelHeader">
           <div class="sectionTitle">Room</div>
+          <button id="roomState" class="panelValue panelValueButton" type="button" title="Copy room code">Not joined</button>
         </div>
         <div class="stack">
           <button id="createRoomButton">Create Room</button>
@@ -34,6 +39,10 @@
         <div class="joinRow actionRow">
           <button id="toggleUnlockButton" class="secondary">Unlock Controls</button>
           <button id="disbandRoomButton" class="danger" hidden>Disband Room</button>
+          <button id="leaveRoomButton" class="danger" hidden>Leave Room</button>
+        </div>
+        <div class="joinRow actionRow">
+          <button id="sharedControlButton" class="secondary" hidden>Enable Shared Control</button>
         </div>
         <div class="joinRow actionRow">
           <button id="remoteActionButton" class="secondary" hidden>Put Down Remote</button>
@@ -43,6 +52,7 @@
       <section class="panel panelSplit">
         <div class="panelHeader">
           <div class="sectionTitle">Server</div>
+          <button id="serverHealthState" class="headerBadge headerBadgeButton" type="button" title="Check server health">Idle</button>
         </div>
         <div class="label">Server URL</div>
         <div class="joinRow compactRow">
@@ -61,12 +71,12 @@
             <div id="connectionMirror" class="value">Disconnected</div>
           </div>
           <div class="metricCell">
-            <div class="label">Room</div>
-            <div id="roomState" class="value">Not joined</div>
-          </div>
-          <div class="metricCell">
             <div class="label">Role</div>
             <div id="roleState" class="value">Viewer</div>
+          </div>
+          <div class="metricCell">
+            <div class="label">Others</div>
+            <div id="viewerCountState" class="value">0</div>
           </div>
           <div class="metricCell">
             <div class="label">Remote</div>
@@ -102,6 +112,7 @@
           <div class="label">Room Media</div>
           <div id="roomMedia" class="small">No room media yet.</div>
         </div>
+        <button id="claimTabButton" class="secondary" hidden>Use Current Tab</button>
         <button id="navigateButton" class="secondary" hidden>Open Room Media</button>
       </section>
 

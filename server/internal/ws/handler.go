@@ -20,6 +20,7 @@ type Handler struct {
 
 type clientConn struct {
 	id      string
+	connID  string
 	conn    *websocket.Conn
 	sendMu  sync.Mutex
 	roomID  string
@@ -49,21 +50,22 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	client := &clientConn{
 		id:      newClientID(),
+		connID:  newClientID(),
 		conn:    conn,
 		manager: h.manager,
 	}
-	log.Printf("websocket connected client_id=%s remote_addr=%s", client.id, r.RemoteAddr)
+	log.Printf("websocket connected conn_id=%s remote_addr=%s", client.connID, r.RemoteAddr)
 	defer func() {
-		log.Printf("websocket disconnected client_id=%s room_id=%s", client.id, client.roomID)
+		log.Printf("websocket disconnected conn_id=%s client_id=%s room_id=%s", client.connID, client.id, client.roomID)
 		if client.roomID != "" {
-			h.manager.RemoveClient(client.roomID, client.id)
+			h.manager.RemoveClient(client.roomID, client.id, client)
 		}
 		_ = conn.Close()
 	}()
 
 	if err := client.write(protocol.Envelope{
 		Type:     "welcome",
-		ClientID: client.id,
+		ClientID: client.connID,
 		SentAt:   time.Now().UnixMilli(),
 	}); err != nil {
 		return
@@ -109,6 +111,13 @@ func (h *Handler) handleMessage(client *clientConn, msg protocol.IncomingEnvelop
 			},
 		})
 	case "create_room":
+		var payload protocol.CreateRoomPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil && len(msg.Payload) > 0 {
+			return err
+		}
+		if payload.ClientSessionID != "" {
+			client.id = payload.ClientSessionID
+		}
 		room, err := h.manager.CreateRoom(client)
 		if err != nil {
 			return err
@@ -129,6 +138,9 @@ func (h *Handler) handleMessage(client *clientConn, msg protocol.IncomingEnvelop
 		var payload protocol.JoinRoomPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			return err
+		}
+		if payload.ClientSessionID != "" {
+			client.id = payload.ClientSessionID
 		}
 		room, err := h.manager.JoinRoom(payload.RoomID, client)
 		if err != nil {
@@ -158,6 +170,12 @@ func (h *Handler) handleMessage(client *clientConn, msg protocol.IncomingEnvelop
 		return h.manager.ReleaseRemote(client.roomID, client.id)
 	case "reclaim_remote":
 		return h.manager.ReclaimRemote(client.roomID, client.id)
+	case "set_shared_control":
+		var payload protocol.SetSharedControlPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return err
+		}
+		return h.manager.SetSharedControl(client.roomID, client.id, payload.Enabled)
 	case "disband_room":
 		roomID := client.roomID
 		if roomID == "" {

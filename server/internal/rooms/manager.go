@@ -18,6 +18,7 @@ const (
 	seekResumeLead      = 600 * time.Millisecond
 	mediaWaitLead       = 15000 * time.Millisecond
 	readyGraceLead      = 5000 * time.Millisecond
+	hostReconnectGrace  = 30 * time.Second
 	roomCodeLength      = 6
 )
 
@@ -32,23 +33,25 @@ type Manager struct {
 }
 
 type Room struct {
-	ID                   string
-	HostClientID         string
-	RemoteHolderClientID string
-	Media                protocol.MediaState
-	BasePositionSeconds  float64
-	PlaybackRate         float64
-	Playing              bool
-	ScheduledStartAtMS   int64
-	LastUpdatedAtMS      int64
-	AutoPlayOnReady      bool
-	Clients              map[string]Client
-	WaitingForReady      bool
-	WaitDeadlineMS       int64
-	ResumePosition       float64
-	ResumePlaybackRate   float64
-	ReadyViewerIDs       map[string]bool
-	ReadyGraceArmed      bool
+	ID                       string
+	HostClientID             string
+	RemoteHolderClientID     string
+	SharedControlEnabled     bool
+	Media                    protocol.MediaState
+	BasePositionSeconds      float64
+	PlaybackRate             float64
+	Playing                  bool
+	ScheduledStartAtMS       int64
+	LastUpdatedAtMS          int64
+	AutoPlayOnReady          bool
+	Clients                  map[string]Client
+	WaitingForReady          bool
+	WaitDeadlineMS           int64
+	ResumePosition           float64
+	ResumePlaybackRate       float64
+	ReadyViewerIDs           map[string]bool
+	ReadyGraceArmed          bool
+	HostDisconnectDeadlineMS int64
 }
 
 func NewManager() *Manager {
@@ -98,16 +101,25 @@ func (m *Manager) JoinRoom(roomID string, client Client) (*Room, error) {
 	}
 
 	room.Clients[client.ID()] = client
+	if room.HostClientID == client.ID() {
+		room.HostDisconnectDeadlineMS = 0
+		room.RemoteHolderClientID = client.ID()
+	}
 	log.Printf("room joined room_id=%s client_id=%s clients=%d", roomID, client.ID(), len(room.Clients))
 	return cloneRoom(room), nil
 }
 
-func (m *Manager) RemoveClient(roomID, clientID string) {
+func (m *Manager) RemoveClient(roomID, clientID string, client Client) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	room, ok := m.rooms[roomID]
 	if !ok {
+		return
+	}
+
+	currentClient, exists := room.Clients[clientID]
+	if !exists || currentClient != client {
 		return
 	}
 
@@ -119,14 +131,10 @@ func (m *Manager) RemoveClient(roomID, clientID string) {
 	}
 
 	if room.HostClientID == clientID {
-		for nextID := range room.Clients {
-			room.HostClientID = nextID
-			log.Printf("host reassigned room_id=%s old_host=%s new_host=%s", roomID, clientID, nextID)
-			break
-		}
-	}
-
-	if room.RemoteHolderClientID == clientID {
+		room.HostDisconnectDeadlineMS = nowMS() + hostReconnectGrace.Milliseconds()
+		log.Printf("host disconnected room_id=%s host_client_id=%s reconnect_deadline_ms=%d", roomID, clientID, room.HostDisconnectDeadlineMS)
+		go m.expireHostReconnectGrace(room.ID, clientID, room.HostDisconnectDeadlineMS)
+	} else if room.RemoteHolderClientID == clientID {
 		room.RemoteHolderClientID = room.HostClientID
 		log.Printf("remote reassigned room_id=%s previous_holder=%s new_holder=%s", roomID, clientID, room.RemoteHolderClientID)
 	}
@@ -164,6 +172,40 @@ func (m *Manager) DisbandRoom(roomID, clientID string) error {
 
 	delete(m.rooms, roomID)
 	return nil
+}
+
+func (m *Manager) expireHostReconnectGrace(roomID, hostClientID string, deadlineMS int64) {
+	timer := time.NewTimer(time.Until(time.UnixMilli(deadlineMS)))
+	defer timer.Stop()
+	<-timer.C
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	room, ok := m.rooms[roomID]
+	if !ok || room.HostClientID != hostClientID || room.HostDisconnectDeadlineMS != deadlineMS {
+		return
+	}
+	if _, stillConnected := room.Clients[hostClientID]; stillConnected {
+		room.HostDisconnectDeadlineMS = 0
+		return
+	}
+
+	for nextID := range room.Clients {
+		room.HostClientID = nextID
+		if room.RemoteHolderClientID == "" || room.RemoteHolderClientID == hostClientID {
+			room.RemoteHolderClientID = nextID
+		}
+		room.HostDisconnectDeadlineMS = 0
+		log.Printf("host reassigned room_id=%s old_host=%s new_host=%s", roomID, hostClientID, nextID)
+		break
+	}
+
+	m.broadcastLocked(room, protocol.Envelope{
+		Type:    "room_state",
+		RoomID:  room.ID,
+		Payload: room.snapshotLocked(nowMS()),
+	})
 }
 
 func (m *Manager) ClaimRemote(roomID, clientID string) error {
@@ -235,6 +277,31 @@ func (m *Manager) ReclaimRemote(roomID, clientID string) error {
 	return nil
 }
 
+func (m *Manager) SetSharedControl(roomID, clientID string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	room, ok := m.rooms[roomID]
+	if !ok {
+		return fmt.Errorf("room not found")
+	}
+	if room.HostClientID != clientID {
+		return fmt.Errorf("only the host can change shared control")
+	}
+
+	room.SharedControlEnabled = enabled
+	if enabled {
+		room.RemoteHolderClientID = room.HostClientID
+	}
+	log.Printf("shared control updated room_id=%s host_client_id=%s enabled=%t", roomID, clientID, enabled)
+	m.broadcastLocked(room, protocol.Envelope{
+		Type:    "room_state",
+		RoomID:  room.ID,
+		Payload: room.snapshotLocked(nowMS()),
+	})
+	return nil
+}
+
 func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, payload json.RawMessage) ([]protocol.Envelope, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -243,7 +310,7 @@ func (m *Manager) HandleControlMessage(roomID, clientID string, msgType string, 
 	if !ok {
 		return nil, fmt.Errorf("room not found")
 	}
-	if room.RemoteHolderClientID != clientID {
+	if !room.SharedControlEnabled && room.RemoteHolderClientID != clientID {
 		return nil, fmt.Errorf("only the current remote holder can control playback")
 	}
 
@@ -558,6 +625,7 @@ func (r *Room) snapshotLocked(now int64) protocol.RoomStatePayload {
 		RoomID:               r.ID,
 		HostClientID:         r.HostClientID,
 		RemoteHolderClientID: r.RemoteHolderClientID,
+		SharedControlEnabled: r.SharedControlEnabled,
 		ViewerCount:          max(0, len(r.Clients)-1),
 		Media:                r.Media,
 		ReferenceServerMS:    now,

@@ -86,6 +86,57 @@ h1 {
   color: var(--muted);
 }
 
+.utilityButton {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: rgba(23, 29, 37, 0.72);
+  color: var(--text);
+}
+
+.utilityButton:hover {
+  background: rgba(34, 43, 55, 0.92);
+}
+
+.utilityButtonBox,
+.utilityButtonArrow {
+  position: absolute;
+  display: block;
+}
+
+.utilityButtonBox {
+  top: 8px;
+  left: 7px;
+  width: 10px;
+  height: 10px;
+  border: 1px solid currentColor;
+}
+
+.utilityButtonArrow {
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+}
+
+.utilityButtonArrow::after {
+  content: "";
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  width: 8px;
+  height: 1px;
+  background: currentColor;
+  transform: rotate(-45deg);
+  transform-origin: right center;
+}
+
 .panel {
   margin-bottom: 12px;
   padding: 14px;
@@ -112,6 +163,50 @@ h1 {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text);
+}
+
+.panelValue {
+  max-width: 150px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-align: right;
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+
+.panelValueButton {
+  position: relative;
+  width: auto;
+  min-width: 0;
+  max-width: 170px;
+  padding: 4px 24px 4px 8px;
+  border: 1px dashed rgba(255, 138, 92, 0.42);
+  background: rgba(255, 138, 92, 0.08);
+  text-align: right;
+}
+
+.panelValueButton::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  width: 10px;
+  height: 12px;
+  border: 1px solid currentColor;
+  border-top-width: 4px;
+  transform: translateY(-50%);
+  opacity: 0.72;
+}
+
+.panelValueButton:hover {
+  background: rgba(255, 138, 92, 0.14);
+}
+
+.panelValueButton.is-copied {
+  border-color: rgba(75, 211, 138, 0.55);
+  background: rgba(75, 211, 138, 0.14);
+  color: #9af0c0;
 }
 
 .stack {
@@ -230,6 +325,48 @@ button.secondary {
   color: var(--text);
 }
 
+button.utilityButton,
+button.utilityButton:hover {
+  border-color: var(--line-strong);
+  background: rgba(23, 29, 37, 0.72);
+  color: var(--text);
+}
+
+button.utilityButton:hover {
+  background: rgba(34, 43, 55, 0.92);
+}
+
+button.panelValueButton,
+button.panelValueButton:hover {
+  border-color: rgba(255, 138, 92, 0.42);
+  background: rgba(255, 138, 92, 0.08);
+  color: var(--accent-2);
+}
+
+button.panelValueButton:hover {
+  background: rgba(255, 138, 92, 0.14);
+}
+
+button.panelValueButton:disabled,
+button.panelValueButton:disabled:hover {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+  opacity: 1;
+}
+
+button.is-saving {
+  border-color: var(--line-strong);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+button.is-saved {
+  border-color: var(--success);
+  background: #10261b;
+  color: #9af0c0;
+}
+
 button.danger {
   border-color: var(--danger);
   background: #2a1013;
@@ -280,6 +417,14 @@ input:disabled {
   color: var(--muted);
 }
 
+.small.successText {
+  color: #9af0c0;
+}
+
+.small.errorText {
+  color: #ff9a9a;
+}
+
 .error {
   margin-top: 10px;
   padding: 9px 11px;
@@ -300,4 +445,67 @@ input:disabled {
   letter-spacing: 0.14em;
   text-align: center;
   text-transform: uppercase;
+}
+
+.headerBadge {
+  min-width: 92px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.headerBadgeButton {
+  width: auto;
+  cursor: pointer;
+}
+
+button.headerBadgeButton,
+button.headerBadgeButton:hover {
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+button.headerBadgeButton {
+  background: var(--panel-2);
+}
+
+button.headerBadgeButton:hover {
+  background: #222b37;
+}
+
+button.headerBadgeButton.headerBadgeSuccess,
+button.headerBadgeButton.headerBadgeSuccess:hover {
+  border-color: rgba(75, 211, 138, 0.5);
+  background: #10261b;
+  color: #9af0c0;
+}
+
+button.headerBadgeButton.headerBadgeError,
+button.headerBadgeButton.headerBadgeError:hover {
+  border-color: rgba(255, 82, 82, 0.4);
+  background: #2a1013;
+  color: #ff9d9d;
+}
+
+.headerBadgeSuccess {
+  border-color: rgba(75, 211, 138, 0.5);
+  background: #10261b;
+  color: #9af0c0;
+}
+
+.headerBadgeError {
+  border-color: rgba(255, 82, 82, 0.4);
+  background: #2a1013;
+  color: #ff9d9d;
+}
+
+body.is-popped-out .popup {
+  width: 100%;
+  min-height: 100vh;
 }
